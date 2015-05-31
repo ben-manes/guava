@@ -300,7 +300,7 @@ public class LocalLoadingCacheTest extends TestCase {
     assertSame(one, cache.getUnchecked(one));
     assertTrue(segment.recencyQueue.isEmpty());
     assertSame(one, map.get(one));
-    assertSame(one, segment.recencyQueue.peek().getKey());
+    assertSame(one, segment.recencyQueue.copy().get(0).getKey());
     assertSame(one, cache.getUnchecked(one));
     assertFalse(segment.recencyQueue.isEmpty());
   }

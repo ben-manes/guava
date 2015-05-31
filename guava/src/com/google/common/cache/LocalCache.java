@@ -33,6 +33,7 @@ import com.google.common.base.Stopwatch;
 import com.google.common.base.Ticker;
 import com.google.common.cache.AbstractCache.SimpleStatsCounter;
 import com.google.common.cache.AbstractCache.StatsCounter;
+import com.google.common.cache.Buffer.Consumer;
 import com.google.common.cache.CacheBuilder.NullListener;
 import com.google.common.cache.CacheBuilder.OneWeigher;
 import com.google.common.cache.CacheLoader.InvalidCacheLoadException;
@@ -64,7 +65,6 @@ import java.util.AbstractSet;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.NoSuchElementException;
 import java.util.Queue;
 import java.util.Set;
@@ -73,7 +73,6 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
@@ -135,15 +134,6 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
 
   /** Number of (unsynchronized) retries in the containsValue method. */
   static final int CONTAINS_VALUE_RETRIES = 3;
-
-  /**
-   * Number of cache access operations that can be buffered per segment before the cache's recency
-   * ordering information is updated. This is used to avoid lock contention by recording a memento
-   * of reads and delaying a lock acquisition until the threshold is crossed or a mutation occurs.
-   *
-   * <p>This must be a (2^n)-1 as it is used as a mask.
-   */
-  static final int DRAIN_THRESHOLD = 0x3F;
 
   /**
    * Maximum number of entries to be drained in a single cleanup run. This applies independently to
@@ -2058,16 +2048,10 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
 
     /**
      * The recency queue is used to record which entries were accessed for updating the access
-     * list's ordering. It is drained as a batch operation when either the DRAIN_THRESHOLD is
-     * crossed or a write occurs on the segment.
+     * list's ordering. It is drained as a batch operation when either the buffer is full or a
+     * write occurs on the segment.
      */
-    final Queue<ReferenceEntry<K, V>> recencyQueue;
-
-    /**
-     * A counter of the number of reads since the last write, used to drain queues on a small
-     * fraction of read operations.
-     */
-    final AtomicInteger readCount = new AtomicInteger();
+    final Buffer<ReferenceEntry<K, V>> recencyQueue;
 
     /**
      * A queue of elements currently in the map, ordered by write time. Elements are added to the
@@ -2099,9 +2083,9 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
       valueReferenceQueue = map.usesValueReferences()
            ? new ReferenceQueue<V>() : null;
 
-      recencyQueue = map.usesAccessQueue()
-          ? new ConcurrentLinkedQueue<ReferenceEntry<K, V>>()
-          : LocalCache.<ReferenceEntry<K, V>>discardingQueue();
+      recencyQueue = map.usesAccessQueue() || map.usesKeyReferences() || map.usesValueReferences()
+          ? new BoundedBuffer<ReferenceEntry<K, V>>()
+          : DisabledBuffer.<ReferenceEntry<K, V>>get();
 
       writeQueue = map.usesWriteQueue()
           ? new WriteQueue<K, V>()
@@ -2579,16 +2563,9 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
       writeQueue.add(entry);
     }
 
-    /**
-     * Drains the recency queue, updating eviction metadata that the entries therein were read in
-     * the specified relative order. This currently amounts to adding them to relevant eviction
-     * lists (accounting for the fact that they could have been removed from the map since being
-     * added to the recency queue).
-     */
-    @GuardedBy("this")
-    void drainRecencyQueue() {
-      ReferenceEntry<K, V> e;
-      while ((e = recencyQueue.poll()) != null) {
+    final Consumer<ReferenceEntry<K, V>> drainRecencyTask = new Consumer<ReferenceEntry<K, V>>() {
+      @Override
+      public void accept(ReferenceEntry<K, V> e) {
         // An entry may be in the recency queue despite it being removed from
         // the map . This can occur when the entry was concurrently read while a
         // writer is removing it from the segment or after a clear has removed
@@ -2597,6 +2574,17 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
           accessQueue.add(e);
         }
       }
+    };
+
+    /**
+     * Drains the recency queue, updating eviction metadata that the entries therein were read in
+     * the specified relative order. This currently amounts to adding them to relevant eviction
+     * lists (accounting for the fact that they could have been removed from the map since being
+     * added to the recency queue).
+     */
+    @GuardedBy("this")
+    void drainRecencyQueue() {
+      recencyQueue.drainTo(drainRecencyTask);
     }
 
     // expiration
@@ -3243,7 +3231,7 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
           clearReferenceQueues();
           writeQueue.clear();
           accessQueue.clear();
-          readCount.set(0);
+          recencyQueue.clear();
 
           ++modCount;
           count = 0; // write-volatile
@@ -3424,7 +3412,7 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
      * is not observed after a sufficient number of reads, try cleaning up from the read thread.
      */
     void postReadCleanup() {
-      if ((readCount.incrementAndGet() & DRAIN_THRESHOLD) == 0) {
+      if (recencyQueue.isFull()) {
         cleanUp();
       }
     }
@@ -3458,7 +3446,6 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
         try {
           drainReferenceQueues();
           expireEntries(now); // calls drainRecencyQueue
-          readCount.set(0);
         } finally {
           unlock();
         }

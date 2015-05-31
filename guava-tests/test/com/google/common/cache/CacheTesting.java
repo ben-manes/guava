@@ -287,7 +287,6 @@ class CacheTesting {
       for (Segment<?, ?> segment : map.segments) {
         drainRecencyQueue(segment);
         assertEquals(0, segment.recencyQueue.size());
-        assertEquals(0, segment.readCount.get());
 
         ReferenceEntry<?, ?> prev = null;
         for (ReferenceEntry<?, ?> current : segment.accessQueue) {

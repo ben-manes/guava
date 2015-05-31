@@ -18,7 +18,6 @@ package com.google.common.cache;
 
 import static com.google.common.cache.CacheBuilder.NULL_TICKER;
 import static com.google.common.cache.LocalCache.DISCARDING_QUEUE;
-import static com.google.common.cache.LocalCache.DRAIN_THRESHOLD;
 import static com.google.common.cache.LocalCache.nullEntry;
 import static com.google.common.cache.LocalCache.unset;
 import static com.google.common.cache.TestingCacheLoaders.identityLoader;
@@ -104,7 +103,7 @@ public class LocalCacheTest extends TestCase {
     return suite;
   }
 
-  static final int SMALL_MAX_SIZE = DRAIN_THRESHOLD * 5;
+  static final int SMALL_MAX_SIZE = Buffer.BUFFER_SIZE * 5;
 
   TestLogHandler logHandler;
 
@@ -477,7 +476,7 @@ public class LocalCacheTest extends TestCase {
           map.get(entry.getKey(), loader);
           reads.add(entry);
           i.remove();
-          assertTrue(segment.recencyQueue.size() <= DRAIN_THRESHOLD);
+          assertTrue(segment.recencyQueue.size() <= Buffer.BUFFER_SIZE);
         }
       }
       int undrainedIndex = reads.size() - segment.recencyQueue.size();
@@ -1675,7 +1674,7 @@ public class LocalCacheTest extends TestCase {
     DummyEntry<Object, Object> entry = createDummyEntry(key, hash, value, null);
     segment.recordWrite(entry, 1, map.ticker.read());
     segment.table.set(0, entry);
-    segment.readCount.incrementAndGet();
+    segment.recencyQueue.add(entry);
     segment.count = 1;
     segment.totalWeight = 1;
 
@@ -1687,7 +1686,7 @@ public class LocalCacheTest extends TestCase {
     assertNull(table.get(0));
     assertTrue(segment.accessQueue.isEmpty());
     assertTrue(segment.writeQueue.isEmpty());
-    assertEquals(0, segment.readCount.get());
+    assertEquals(0, segment.recencyQueue.size());
     assertEquals(0, segment.count);
     assertEquals(0, segment.totalWeight);
   }
@@ -1710,7 +1709,7 @@ public class LocalCacheTest extends TestCase {
     DummyEntry<Object, Object> entry = createDummyEntry(key, hash, value, null);
     segment.recordWrite(entry, 1, map.ticker.read());
     segment.table.set(0, entry);
-    segment.readCount.incrementAndGet();
+    segment.recencyQueue.add(entry);
     segment.count = 1;
     segment.totalWeight = 1;
 
@@ -1722,7 +1721,7 @@ public class LocalCacheTest extends TestCase {
     assertNull(table.get(0));
     assertTrue(segment.accessQueue.isEmpty());
     assertTrue(segment.writeQueue.isEmpty());
-    assertEquals(0, segment.readCount.get());
+    assertEquals(0, segment.recencyQueue.size());
     assertEquals(0, segment.count);
     assertEquals(0, segment.totalWeight);
     assertNotified(listener, key, value, RemovalCause.EXPLICIT);
@@ -1872,7 +1871,7 @@ public class LocalCacheTest extends TestCase {
       LocalCache<Object, Object> map = makeLocalCache(builder.concurrencyLevel(1));
       Segment<Object, Object> segment = map.segments[0];
 
-      if (segment.recencyQueue != DISCARDING_QUEUE) {
+      if ((Object) segment.recencyQueue != DisabledBuffer.get()) {
         Object keyOne = new Object();
         Object valueOne = new Object();
         Object keyTwo = new Object();
@@ -1881,7 +1880,7 @@ public class LocalCacheTest extends TestCase {
         map.put(keyOne, valueOne);
         assertTrue(segment.recencyQueue.isEmpty());
 
-        for (int i = 0; i < DRAIN_THRESHOLD / 2; i++) {
+        for (int i = 0; i < Buffer.BUFFER_SIZE / 2; i++) {
           map.get(keyOne);
         }
         assertFalse(segment.recencyQueue.isEmpty());
@@ -1897,7 +1896,7 @@ public class LocalCacheTest extends TestCase {
       LocalCache<Object, Object> map = makeLocalCache(builder.concurrencyLevel(1));
       Segment<Object, Object> segment = map.segments[0];
 
-      if (segment.recencyQueue != DISCARDING_QUEUE) {
+      if ((Object) segment.recencyQueue != DisabledBuffer.get()) {
         Object keyOne = new Object();
         Object valueOne = new Object();
 
@@ -1906,31 +1905,31 @@ public class LocalCacheTest extends TestCase {
         map.put(keyOne, valueOne);
         assertTrue(segment.recencyQueue.isEmpty());
 
-        for (int i = 0; i < DRAIN_THRESHOLD / 2; i++) {
+        for (int i = 0; i < Buffer.BUFFER_SIZE / 2; i++) {
           map.get(keyOne);
         }
         assertFalse(segment.recencyQueue.isEmpty());
 
-        for (int i = 0; i < DRAIN_THRESHOLD * 2; i++) {
+        for (int i = 0; i < Buffer.BUFFER_SIZE * 2; i++) {
           map.get(keyOne);
-          assertTrue(segment.recencyQueue.size() <= DRAIN_THRESHOLD);
+          assertTrue(segment.recencyQueue.size() <= Buffer.BUFFER_SIZE);
         }
 
         // get over many different keys
 
-        for (int i = 0; i < DRAIN_THRESHOLD * 2; i++) {
+        for (int i = 0; i < Buffer.BUFFER_SIZE * 2; i++) {
           map.put(new Object(), new Object());
         }
         assertTrue(segment.recencyQueue.isEmpty());
 
-        for (int i = 0; i < DRAIN_THRESHOLD / 2; i++) {
+        for (int i = 0; i < Buffer.BUFFER_SIZE / 2; i++) {
           map.get(keyOne);
         }
         assertFalse(segment.recencyQueue.isEmpty());
 
         for (Object key : map.keySet()) {
           map.get(key);
-          assertTrue(segment.recencyQueue.size() <= DRAIN_THRESHOLD);
+          assertTrue(segment.recencyQueue.size() <= Buffer.BUFFER_SIZE);
         }
       }
     }
@@ -1942,7 +1941,7 @@ public class LocalCacheTest extends TestCase {
       Segment<Object, Object> segment = map.segments[0];
       List<ReferenceEntry<Object, Object>> writeOrder = Lists.newLinkedList();
       List<ReferenceEntry<Object, Object>> readOrder = Lists.newLinkedList();
-      for (int i = 0; i < DRAIN_THRESHOLD * 2; i++) {
+      for (int i = 0; i < Buffer.BUFFER_SIZE * 2; i++) {
         Object key = new Object();
         int hash = map.hash(key);
         Object value = new Object();
@@ -1968,6 +1967,9 @@ public class LocalCacheTest extends TestCase {
           reads.add(entry);
           i.remove();
         }
+        if (reads.size() == Buffer.BUFFER_SIZE) {
+          break;
+        }
       }
       checkAndDrainRecencyQueue(map, segment, reads);
       readOrder.addAll(reads);
@@ -1983,7 +1985,7 @@ public class LocalCacheTest extends TestCase {
       Segment<Object, Object> segment = map.segments[0];
       List<ReferenceEntry<Object, Object>> writeOrder = Lists.newLinkedList();
       List<ReferenceEntry<Object, Object>> readOrder = Lists.newLinkedList();
-      for (int i = 0; i < DRAIN_THRESHOLD * 2; i++) {
+      for (int i = 0; i < Buffer.BUFFER_SIZE * 2; i++) {
         Object key = new Object();
         int hash = map.hash(key);
         Object value = new Object();
@@ -2008,7 +2010,7 @@ public class LocalCacheTest extends TestCase {
           map.get(entry.getKey());
           reads.add(entry);
           i.remove();
-          assertTrue(segment.recencyQueue.size() <= DRAIN_THRESHOLD);
+          assertTrue(segment.recencyQueue.size() <= Buffer.BUFFER_SIZE);
         }
       }
       int undrainedIndex = reads.size() - segment.recencyQueue.size();
@@ -2025,7 +2027,7 @@ public class LocalCacheTest extends TestCase {
       LocalCache<Object, Object> map = makeLocalCache(builder.concurrencyLevel(1));
       Segment<Object, Object> segment = map.segments[0];
       List<ReferenceEntry<Object, Object>> writeOrder = Lists.newLinkedList();
-      for (int i = 0; i < DRAIN_THRESHOLD * 2; i++) {
+      for (int i = 0; i < Buffer.BUFFER_SIZE * 2; i++) {
         Object key = new Object();
         int hash = map.hash(key);
         Object value = new Object();
@@ -2061,7 +2063,7 @@ public class LocalCacheTest extends TestCase {
   static <K, V> void checkAndDrainRecencyQueue(LocalCache<K, V> map,
       Segment<K, V> segment, List<ReferenceEntry<K, V>> reads) {
     if (map.evictsBySize() || map.expiresAfterAccess()) {
-      assertSameEntries(reads, ImmutableList.copyOf(segment.recencyQueue));
+      assertSameEntries(reads, segment.recencyQueue.copy());
     }
     segment.drainRecencyQueue();
   }
@@ -2097,7 +2099,7 @@ public class LocalCacheTest extends TestCase {
     for (Segment<K, V> segment : map.segments) {
       long lastAccessTime = 0;
       long lastWriteTime = 0;
-      for (ReferenceEntry<K, V> e : segment.recencyQueue) {
+      for (ReferenceEntry<K, V> e : segment.recencyQueue.copy()) {
         long accessTime = e.getAccessTime();
         assertTrue(accessTime >= lastAccessTime);
         lastAccessTime = accessTime;
@@ -2326,7 +2328,6 @@ public class LocalCacheTest extends TestCase {
         Object keyOne = new Object();
         int hashOne = map.hash(keyOne);
         Object valueOne = new Object();
-        Object keyTwo = new Object();
 
         map.put(keyOne, valueOne);
         ReferenceEntry<Object, Object> entry = segment.getEntry(keyOne, hashOne);
@@ -2336,7 +2337,7 @@ public class LocalCacheTest extends TestCase {
         reference.enqueue();
 
         for (int i = 0; i < SMALL_MAX_SIZE; i++) {
-          map.get(keyTwo);
+          map.get(keyOne);
         }
         assertFalse(map.containsKey(keyOne));
         assertFalse(map.containsValue(valueOne));
@@ -2357,7 +2358,6 @@ public class LocalCacheTest extends TestCase {
         Object keyOne = new Object();
         int hashOne = map.hash(keyOne);
         Object valueOne = new Object();
-        Object keyTwo = new Object();
 
         map.put(keyOne, valueOne);
         ReferenceEntry<Object, Object> entry = segment.getEntry(keyOne, hashOne);
@@ -2368,7 +2368,7 @@ public class LocalCacheTest extends TestCase {
         reference.enqueue();
 
         for (int i = 0; i < SMALL_MAX_SIZE; i++) {
-          map.get(keyTwo);
+          map.get(keyOne);
         }
         assertFalse(map.containsKey(keyOne));
         assertFalse(map.containsValue(valueOne));

@@ -16,6 +16,7 @@
 
 package com.google.common.cache;
 
+import com.google.common.base.Predicates;
 import com.google.common.testing.AbstractPackageSanityTests;
 
 /**
@@ -32,5 +33,6 @@ public class PackageSanityTests extends AbstractPackageSanityTests {
       }});
     setDefault(LocalCache.class, new LocalCache<Object, Object>(CacheBuilder.newBuilder(), null));
     setDefault(CacheBuilder.class, CacheBuilder.newBuilder());
+    ignoreClasses(Predicates.assignableFrom(Buffer.class));
   }
 }
