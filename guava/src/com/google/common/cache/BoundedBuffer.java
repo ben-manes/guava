@@ -15,18 +15,19 @@
  */
 package com.google.common.cache;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
 final class BoundedBuffer<E> implements Buffer<E> {
-  /** Mask value for indexing into the ring buffer. */
-  static final int BUFFER_MASK = BUFFER_SIZE - 1;
+  // Assume 4-byte references and 64-byte cache line (16 elements per line)
+  static final int SPACED_SIZE = BUFFER_SIZE << 4;
+  static final int SPACED_MASK = SPACED_SIZE - 1;
+  static final int OFFSET = 16;
 
   static final Consumer<Object> NULL_CONSUMER = new Consumer<Object>() {
     @Override public void accept(Object e) {}
@@ -34,7 +35,7 @@ final class BoundedBuffer<E> implements Buffer<E> {
 
   final AtomicLong readCounter;
   final AtomicLong writeCounter;
-  final AtomicReference<E>[] buffer;
+  final AtomicReferenceArray<E> buffer;
 
   volatile boolean full;
 
@@ -42,15 +43,12 @@ final class BoundedBuffer<E> implements Buffer<E> {
   public BoundedBuffer() {
     readCounter = new AtomicLong();
     writeCounter = new AtomicLong();
-    buffer = new AtomicReference[BUFFER_SIZE];
-    for (int i = 0; i < BUFFER_SIZE; i++) {
-      buffer[i] = new AtomicReference<E>();
-    }
+    buffer = new AtomicReferenceArray<E>(SPACED_SIZE);
   }
 
   @Override
   public int size() {
-    return (int) (writeCounter.get() - readCounter.get());
+    return (int) (writeCounter.get() - readCounter.get()) / OFFSET;
   }
 
   @Override
@@ -69,10 +67,10 @@ final class BoundedBuffer<E> implements Buffer<E> {
     long tail = writeCounter.get();
     long size = (tail - head);
 
-    if ((size < BUFFER_SIZE) && writeCounter.compareAndSet(tail, tail + 1)) {
-      int index = (int) (tail & BUFFER_MASK);
-      buffer[index].lazySet(e);
-      if (size == BUFFER_MASK) {
+    if ((size < SPACED_SIZE) && writeCounter.compareAndSet(tail, tail + OFFSET)) {
+      int index = (int) (tail & SPACED_MASK);
+      buffer.lazySet(index, e);
+      if (size == SPACED_MASK) {
         full = true;
       }
     }
@@ -88,16 +86,15 @@ final class BoundedBuffer<E> implements Buffer<E> {
       return;
     }
     do {
-      int index = (int) (head & BUFFER_MASK);
-      AtomicReference<E> slot = buffer[index];
-      E e = slot.get();
+      int index = (int) (head & SPACED_MASK);
+      E e = buffer.get(index);
       if (e == null) {
         // not published yet
         break;
       }
-      slot.lazySet(null);
+      buffer.lazySet(index, null);
       consumer.accept(e);
-      head++;
+      head += OFFSET;
     } while (head != tail);
     readCounter.lazySet(head);
     full = false;
@@ -110,13 +107,11 @@ final class BoundedBuffer<E> implements Buffer<E> {
   }
 
   @Override
-  @VisibleForTesting
   public ImmutableList<E> copy() {
     ImmutableList.Builder<E> builder = ImmutableList.builder();
-    for (long i = readCounter.get(); i < writeCounter.get(); i++) {
-      int index = (int) (i & BUFFER_MASK);
-      AtomicReference<E> slot = buffer[index];
-      E e = slot.get();
+    for (long i = readCounter.get(); i < writeCounter.get(); i += OFFSET) {
+      int index = (int) (i & SPACED_MASK);
+      E e = buffer.get(index);
       if (e == null) {
         // not published yet
         break;
