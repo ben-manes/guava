@@ -25,8 +25,12 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
 import java.util.function.IntConsumer;
 import java.util.stream.IntStream;
+
+import org.junit.Assert;
+
 import junit.framework.TestCase;
 
 /** Test Java8 map.compute in concurrent cache context. */
@@ -194,6 +198,31 @@ public class LocalCacheMapComputeTest extends TestCase {
           });
       fail("Should not get here");
     } catch (RuntimeException ex) {
+    }
+  }
+
+  public void testMerge_recurse() {
+    cache.put(key, "1");
+
+    // As we cannot provide immediate checking without an expensive solution, e.g. ThreadLocal,
+    // instead we assert that a stack overflow error will occur to inform the developer (vs
+    // a live-lock or deadlock alternative).
+    BiFunction<String, String, String> mappingFunction =
+        new BiFunction<String, String, String>() {
+          int recursed;
+
+          @Override public String apply(String oldValue, String value) {
+            if (++recursed == 2) {
+              throw new StackOverflowError();
+            }
+            return cache.asMap().merge(key, "1", this);
+          }
+        };
+    try {
+      cache.asMap().merge(key, "1", mappingFunction);
+      Assert.fail();
+    } catch (IllegalStateException e) {
+      assertThat(e).hasMessageThat().contains("Recursive load");
     }
   }
 }

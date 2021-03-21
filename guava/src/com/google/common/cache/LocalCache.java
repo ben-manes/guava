@@ -3604,8 +3604,17 @@ class LocalCache<K, V> extends AbstractMap<K, V> implements ConcurrentMap<K, V> 
   }
 
   static class ComputingValueReference<K, V> extends LoadingValueReference<K, V> {
+    final long threadId = Thread.currentThread().getId();
+
     ComputingValueReference(ValueReference<K, V> oldValue) {
       super(oldValue);
+    }
+
+    @Override
+    public V compute(K key, BiFunction<? super K, ? super V, ? extends V> function) {
+      checkState(futureValue.isDone()
+          || (Thread.currentThread().getId() != threadId), "Recursive load of: %s", key);
+      return super.compute(key, function);
     }
 
     @Override
